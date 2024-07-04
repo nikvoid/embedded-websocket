@@ -11,25 +11,8 @@ use crate::{
     WebSocketType,
 };
 use core::{cmp::min, str::Utf8Error};
+use embedded_io_async::Write;
 use rand_core::RngCore;
-
-// automagically implement the Stream trait for TcpStream if we are using the standard library
-// if you were using no_std you would have to implement your own stream
-#[cfg(feature = "std")]
-impl Stream<std::io::Error> for std::net::TcpStream {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        std::io::Read::read(self, buf)
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> Result<(), std::io::Error> {
-        std::io::Write::write_all(self, buf)
-    }
-}
-
-pub trait Stream<E> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, E>;
-    fn write_all(&mut self, buf: &[u8]) -> Result<(), E>;
-}
 
 pub enum ReadResult<'a> {
     Binary(&'a [u8]),
@@ -45,6 +28,7 @@ pub enum FramerError<E> {
     Utf8(Utf8Error),
     HttpHeader(httparse::Error),
     WebSocket(crate::Error),
+    Other,
 }
 
 pub struct Framer<'a, TRng, TWebSocketType>
@@ -64,10 +48,10 @@ impl<'a, TRng> Framer<'a, TRng, crate::Client>
 where
     TRng: RngCore,
 {
-    pub fn connect<E>(
+    pub async fn connect<E>(
         &mut self,
-        stream: &mut impl Stream<E>,
-        websocket_options: &WebSocketOptions,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        websocket_options: &WebSocketOptions<'a>,
     ) -> Result<Option<WebSocketSubProtocol>, FramerError<E>> {
         let (len, web_socket_key) = self
             .websocket
@@ -75,14 +59,16 @@ where
             .map_err(FramerError::WebSocket)?;
         stream
             .write_all(&self.write_buf[..len])
-            .map_err(FramerError::Io)?;
+            .await
+            .map_err(|_| FramerError::Other)?;
         *self.read_cursor = 0;
 
         loop {
             // read the response from the server and check it to complete the opening handshake
             let received_size = stream
                 .read(&mut self.read_buf[*self.read_cursor..])
-                .map_err(FramerError::Io)?;
+                .await
+                .map_err(|_| FramerError::Other)?;
 
             match self.websocket.client_accept(
                 &web_socket_key,
@@ -111,9 +97,9 @@ impl<'a, TRng> Framer<'a, TRng, crate::Server>
 where
     TRng: RngCore,
 {
-    pub fn accept<E>(
+    pub async fn accept<E>(
         &mut self,
-        stream: &mut impl Stream<E>,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         websocket_context: &WebSocketContext,
     ) -> Result<(), FramerError<E>> {
         let len = self
@@ -123,7 +109,8 @@ where
 
         stream
             .write_all(&self.write_buf[..len])
-            .map_err(FramerError::Io)?;
+            .await
+            .map_err(|_| FramerError::Other)?;
         Ok(())
     }
 }
@@ -135,7 +122,7 @@ where
 {
     // read and write buffers are usually quite small (4KB) and can be smaller
     // than the frame buffer but use whatever is is appropriate for your stream
-    pub fn new(
+    pub async fn new(
         read_buf: &'a mut [u8],
         read_cursor: &'a mut usize,
         write_buf: &'a mut [u8],
@@ -156,9 +143,9 @@ where
     }
 
     // calling close on a websocket that has already been closed by the other party has no effect
-    pub fn close<E>(
+    pub async fn close<E>(
         &mut self,
-        stream: &mut impl Stream<E>,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         close_status: WebSocketCloseStatusCode,
         status_description: Option<&str>,
     ) -> Result<(), FramerError<E>> {
@@ -168,13 +155,14 @@ where
             .map_err(FramerError::WebSocket)?;
         stream
             .write_all(&self.write_buf[..len])
-            .map_err(FramerError::Io)?;
+            .await
+            .map_err(|_| FramerError::Other)?;
         Ok(())
     }
 
-    pub fn write<E>(
+    pub async fn write<E>(
         &mut self,
-        stream: &mut impl Stream<E>,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         message_type: WebSocketSendMessageType,
         end_of_message: bool,
         frame_buf: &[u8],
@@ -185,21 +173,25 @@ where
             .map_err(FramerError::WebSocket)?;
         stream
             .write_all(&self.write_buf[..len])
-            .map_err(FramerError::Io)?;
+            .await
+            .map_err(|_| FramerError::Other)?;
         Ok(())
     }
 
     // frame_buf should be large enough to hold an entire websocket text frame
     // this function will block until it has recieved a full websocket frame.
     // It will wait until the last fragmented frame has arrived.
-    pub fn read<'b, E>(
+    pub async fn read<'b, E>(
         &mut self,
-        stream: &mut impl Stream<E>,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         frame_buf: &'b mut [u8],
     ) -> Result<ReadResult<'b>, FramerError<E>> {
         loop {
             if *self.read_cursor == 0 || *self.read_cursor == self.read_len {
-                self.read_len = stream.read(self.read_buf).map_err(FramerError::Io)?;
+                self.read_len = stream
+                    .read(self.read_buf)
+                    .await
+                    .map_err(|_| FramerError::Other)?;
                 *self.read_cursor = 0;
             }
 
@@ -250,7 +242,8 @@ where
                             frame_buf,
                             ws_result.len_to,
                             WebSocketSendMessageType::CloseReply,
-                        )?;
+                        )
+                        .await?;
                         return Ok(ReadResult::Closed);
                     }
                     WebSocketReceiveMessageType::CloseCompleted => return Ok(ReadResult::Closed),
@@ -260,7 +253,8 @@ where
                             frame_buf,
                             ws_result.len_to,
                             WebSocketSendMessageType::Pong,
-                        )?;
+                        )
+                        .await?;
                     }
                     WebSocketReceiveMessageType::Pong => {
                         let bytes =
@@ -272,9 +266,9 @@ where
         }
     }
 
-    fn send_back<E>(
+    async fn send_back<E>(
         &mut self,
-        stream: &mut impl Stream<E>,
+        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         frame_buf: &'_ mut [u8],
         len_to: usize,
         send_message_type: WebSocketSendMessageType,
@@ -287,7 +281,8 @@ where
             .map_err(FramerError::WebSocket)?;
         stream
             .write_all(&self.write_buf[..len])
-            .map_err(FramerError::Io)?;
+            .await
+            .map_err(|_| FramerError::Other)?;
         Ok(())
     }
 }

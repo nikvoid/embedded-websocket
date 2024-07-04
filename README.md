@@ -99,3 +99,7 @@ Async support is experimental and subject to significant API change.
 ## License 
 
 Licensed under either MIT or Apache-2.0 at your option
+
+## TODO:
+- [ ] Rewrite README
+- [ ] Examples

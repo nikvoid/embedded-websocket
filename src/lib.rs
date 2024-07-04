@@ -26,7 +26,6 @@ pub use self::random::EmptyRng;
 // support for working with discrete websocket frames when using IO streams
 // start here!!
 pub mod framer;
-pub mod framer_async;
 const MASK_KEY_LEN: usize = 4;
 
 /// Result returning a websocket specific error if encountered
