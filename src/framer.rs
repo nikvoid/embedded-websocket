@@ -11,7 +11,7 @@ use crate::{
     WebSocketType,
 };
 use core::{cmp::min, str::Utf8Error};
-use embedded_io_async::Write;
+use embedded_io_async::{Read, Write};
 use rand_core::RngCore;
 
 pub enum ReadResult<'a> {
@@ -31,7 +31,7 @@ pub enum FramerError<E> {
     Other,
 }
 
-pub struct Framer<'a, TRng, TWebSocketType>
+pub struct Framer<'a, TRng, TWebSocketType, S: Read + Write>
 where
     TRng: RngCore,
     TWebSocketType: WebSocketType,
@@ -42,22 +42,23 @@ where
     frame_cursor: usize,
     read_len: usize,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
+    socket: &'a mut S,
 }
 
-impl<'a, TRng> Framer<'a, TRng, crate::Client>
+impl<'a, TRng, S> Framer<'a, TRng, crate::Client, S>
 where
     TRng: RngCore,
+    S: Read + Write,
 {
     pub async fn connect<E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
         websocket_options: &WebSocketOptions<'a>,
     ) -> Result<Option<WebSocketSubProtocol>, FramerError<E>> {
         let (len, web_socket_key) = self
             .websocket
             .client_connect(websocket_options, self.write_buf)
             .map_err(FramerError::WebSocket)?;
-        stream
+        self.socket
             .write_all(&self.write_buf[..len])
             .await
             .map_err(|_| FramerError::Other)?;
@@ -65,7 +66,8 @@ where
 
         loop {
             // read the response from the server and check it to complete the opening handshake
-            let received_size = stream
+            let received_size = self
+                .socket
                 .read(&mut self.read_buf[*self.read_cursor..])
                 .await
                 .map_err(|_| FramerError::Other)?;
@@ -93,13 +95,14 @@ where
     }
 }
 
-impl<'a, TRng> Framer<'a, TRng, crate::Server>
+impl<'a, TRng, S> Framer<'a, TRng, crate::Server, S>
 where
     TRng: RngCore,
+    S: Read + Write,
 {
     pub async fn accept<E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        stream: &mut S,
         websocket_context: &WebSocketContext,
     ) -> Result<(), FramerError<E>> {
         let len = self
@@ -115,10 +118,11 @@ where
     }
 }
 
-impl<'a, TRng, TWebSocketType> Framer<'a, TRng, TWebSocketType>
+impl<'a, TRng, TWebSocketType, S> Framer<'a, TRng, TWebSocketType, S>
 where
     TRng: RngCore,
     TWebSocketType: WebSocketType,
+    S: Read + Write,
 {
     // read and write buffers are usually quite small (4KB) and can be smaller
     // than the frame buffer but use whatever is is appropriate for your stream
@@ -127,6 +131,7 @@ where
         read_cursor: &'a mut usize,
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
+        socket: &'a mut S,
     ) -> Self {
         Self {
             read_buf,
@@ -135,6 +140,7 @@ where
             frame_cursor: 0,
             read_len: 0,
             websocket,
+            socket,
         }
     }
 
@@ -145,7 +151,7 @@ where
     // calling close on a websocket that has already been closed by the other party has no effect
     pub async fn close<E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        stream: &mut S,
         close_status: WebSocketCloseStatusCode,
         status_description: Option<&str>,
     ) -> Result<(), FramerError<E>> {
@@ -162,7 +168,7 @@ where
 
     pub async fn write<E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        stream: &mut S,
         message_type: WebSocketSendMessageType,
         end_of_message: bool,
         frame_buf: &[u8],
@@ -183,7 +189,7 @@ where
     // It will wait until the last fragmented frame has arrived.
     pub async fn read<'b, E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        stream: &mut S,
         frame_buf: &'b mut [u8],
     ) -> Result<ReadResult<'b>, FramerError<E>> {
         loop {
@@ -268,7 +274,7 @@ where
 
     async fn send_back<E>(
         &mut self,
-        stream: &mut embassy_net::tcp::TcpSocket<'_>,
+        stream: &mut S,
         frame_buf: &'_ mut [u8],
         len_to: usize,
         send_message_type: WebSocketSendMessageType,
