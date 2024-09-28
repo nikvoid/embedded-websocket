@@ -18,6 +18,7 @@ httparse = { version = "1.9.4", default-features = false }
 rand_core = { version = "0.6.4", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
 embedded-io-async = "0.6.1"
+tokio = { version = "1.40.0", optional = true, default-features = false, features = ["io-util", "net"] }
 
 [dev-dependencies]
 rand = "0.8.5"
@@ -25,7 +26,8 @@ bytes = "1.7.2"
 tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
 tokio-util = { version = "0.7.12", features = ["net", "codec"] }
 embedded-io-async = { version = "0.6.1", features = ["std"] }
+embedded-websocket = { path = "./", features = ["std"] }
 
 [features]
 default = []
-std = ["httparse/std"]
+std = ["httparse/std", "dep:tokio"]

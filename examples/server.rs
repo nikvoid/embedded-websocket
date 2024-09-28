@@ -9,13 +9,9 @@
 // Note that we are using the standard library in the demo but the websocket library remains no_std
 
 use embedded_websocket as ws;
-use std::net::{TcpListener, TcpStream};
 use std::str::Utf8Error;
-use std::thread;
-use std::{
-    io::{Read, Write},
-    usize,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use ws::framer::ReadResult;
 use ws::{
     framer::{Framer, FramerError},
@@ -27,7 +23,7 @@ type Result<T> = std::result::Result<T, WebServerError>;
 #[derive(Debug)]
 pub enum WebServerError {
     Io(std::io::Error),
-    Framer(FramerError<std::io::Error>),
+    Framer(FramerError),
     WebSocket(ws::Error),
     Utf8Error,
 }
@@ -38,8 +34,8 @@ impl From<std::io::Error> for WebServerError {
     }
 }
 
-impl From<FramerError<std::io::Error>> for WebServerError {
-    fn from(err: FramerError<std::io::Error>) -> WebServerError {
+impl From<FramerError> for WebServerError {
+    fn from(err: FramerError) -> WebServerError {
         WebServerError::Framer(err)
     }
 }
@@ -56,33 +52,33 @@ impl From<Utf8Error> for WebServerError {
     }
 }
 
-fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
     let addr = "127.0.0.1:1337";
-    let listener = TcpListener::bind(addr)?;
+    let listener = TcpListener::bind(addr).await?;
     println!("Listening on: {}", addr);
 
     // accept connections and process them serially
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                thread::spawn(|| match handle_client(stream) {
-                    Ok(()) => println!("Connection closed"),
-                    Err(e) => println!("Error: {:?}", e),
-                });
+    while let Ok(stream) = listener.accept().await {
+        tokio::spawn(async move {
+            match handle_client(stream.0).await {
+                Ok(()) => println!("Connection closed"),
+                Err(e) => println!("Error: {:?}", e),
             }
-            Err(e) => println!("Failed to establish a connection: {}", e),
-        }
+        });
     }
 
     Ok(())
 }
 
-fn handle_client(mut stream: TcpStream) -> Result<()> {
+async fn handle_client(mut stream: TcpStream) -> Result<()> {
     println!("Client connected {}", stream.peer_addr()?);
     let mut read_buf = [0; 4000];
     let mut read_cursor = 0;
 
-    if let Some(websocket_context) = read_header(&mut stream, &mut read_buf, &mut read_cursor)? {
+    if let Some(websocket_context) =
+        read_header(&mut stream, &mut read_buf, &mut read_cursor).await?
+    {
         // this is a websocket upgrade HTTP request
         let mut write_buf = [0; 4000];
         let mut frame_buf = [0; 4000];
@@ -95,20 +91,22 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
         );
 
         // complete the opening handshake with the client
-        framer.accept(&mut stream, &websocket_context)?;
+        framer.accept(&mut stream, &websocket_context).await?;
         println!("Websocket connection opened");
 
         // read websocket frames
-        while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
+        while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf).await? {
             println!("Received: {}", text);
 
             // send the text back to the client
-            framer.write(
-                &mut stream,
-                WebSocketSendMessageType::Text,
-                true,
-                text.as_bytes(),
-            )?
+            framer
+                .write(
+                    &mut stream,
+                    WebSocketSendMessageType::Text,
+                    true,
+                    text.as_bytes(),
+                )
+                .await?
         }
 
         println!("Closing websocket connection");
@@ -119,7 +117,7 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     }
 }
 
-fn read_header(
+async fn read_header(
     stream: &mut TcpStream,
     read_buf: &mut [u8],
     read_cursor: &mut usize,
@@ -128,7 +126,7 @@ fn read_header(
         let mut headers = [httparse::EMPTY_HEADER; 16];
         let mut request = httparse::Request::new(&mut headers);
 
-        let received_size = stream.read(&mut read_buf[*read_cursor..])?;
+        let received_size = stream.read(&mut read_buf[*read_cursor..]).await?;
 
         match request
             .parse(&read_buf[..*read_cursor + received_size])
@@ -143,10 +141,10 @@ fn read_header(
                         Some("/chat") => {
                             return Ok(Some(websocket_context));
                         }
-                        _ => return_404_not_found(stream, request.path)?,
+                        _ => return_404_not_found(stream, request.path).await?,
                     },
                     None => {
-                        handle_non_websocket_http_request(stream, request.path)?;
+                        handle_non_websocket_http_request(stream, request.path).await?;
                     }
                 }
                 return Ok(None);
@@ -157,23 +155,26 @@ fn read_header(
     }
 }
 
-fn handle_non_websocket_http_request(stream: &mut TcpStream, path: Option<&str>) -> Result<()> {
+async fn handle_non_websocket_http_request(
+    stream: &mut TcpStream,
+    path: Option<&str>,
+) -> Result<()> {
     println!("Received file request: {:?}", path);
 
     match path {
-        Some("/") => stream.write_all(&ROOT_HTML.as_bytes())?,
+        Some("/") => stream.write_all(&ROOT_HTML.as_bytes()).await?,
         unknown_path => {
-            return_404_not_found(stream, unknown_path)?;
+            return_404_not_found(stream, unknown_path).await?;
         }
     };
 
     Ok(())
 }
 
-fn return_404_not_found(stream: &mut TcpStream, unknown_path: Option<&str>) -> Result<()> {
+async fn return_404_not_found(stream: &mut TcpStream, unknown_path: Option<&str>) -> Result<()> {
     println!("Unknown path: {:?}", unknown_path);
     let html = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    stream.write_all(&html.as_bytes())?;
+    stream.write_all(&html.as_bytes()).await?;
     Ok(())
 }
 

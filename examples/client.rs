@@ -13,15 +13,16 @@ use embedded_websocket::{
     framer::{Framer, FramerError, ReadResult},
     WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };
-use std::error::Error;
 use tokio::net::TcpStream;
 
 #[tokio::main]
-async fn main() -> Result<(), FramerError<impl Error>> {
+async fn main() -> Result<(), FramerError> {
     // open a TCP stream to localhost port 1337
     let address = "127.0.0.1:1337";
     println!("Connecting to: {}", address);
-    let mut stream = TcpStream::connect(address).await.map_err(FramerError::Io)?;
+    let mut stream = TcpStream::connect(address)
+        .await
+        .map_err(|_| FramerError::Io)?;
     println!("Connected.");
 
     let mut read_buf = [0; 4000];
@@ -44,31 +45,27 @@ async fn main() -> Result<(), FramerError<impl Error>> {
         &mut read_cursor,
         &mut write_buf,
         &mut websocket,
-        &mut stream.into()
-    )
-    .await;
+    );
 
-    framer
-        .connect(&websocket_options)
-        .await?;
+    framer.connect(&mut stream, &websocket_options).await?;
 
     let message = "Hello, World!";
     framer
         .write(
-            &mut stream.into(),
+            &mut stream,
             WebSocketSendMessageType::Text,
             true,
             message.as_bytes(),
         )
         .await?;
 
-    while let ReadResult::Text(s) = framer.read(&mut stream.into(), &mut frame_buf).await? {
+    while let ReadResult::Text(s) = framer.read(&mut stream, &mut frame_buf).await? {
         println!("Received: {}", s);
 
         // close the websocket after receiving the first reply
         framer
             .close(
-                &mut stream.into(),
+                &mut stream,
                 WebSocketCloseStatusCode::NormalClosure,
                 Some("Done chatting"),
             )
