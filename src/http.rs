@@ -89,6 +89,7 @@ pub fn read_server_connect_handshake_response(
 
     match response.parse(from)? {
         httparse::Status::Complete(len) => {
+            log::trace!("HTTP Response: {}", core::str::from_utf8(from).unwrap_or("<UTF8 ERR>"));
             match response.code {
                 Some(101) => {
                     // we are ok
